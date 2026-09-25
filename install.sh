@@ -38,7 +38,7 @@ curl -fsSL "$base/checksums.txt" -o "$tmp/checksums.txt" || die "download failed
 chmod 755 "$tmp/$file"
 
 # The link and sudo's password prompt read from the terminal, not from this pipe.
-if [ -r /dev/tty ]; then
+if { true </dev/tty; } 2>/dev/null; then
   "$tmp/$file" "$@" </dev/tty
 else
   "$tmp/$file" "$@"
