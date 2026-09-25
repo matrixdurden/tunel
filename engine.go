@@ -86,11 +86,24 @@ func clientConfig(l Link, socksPort int, logPath string) obj {
 		"final":    "remote",
 		"strategy": "ipv4_only",
 	}
-	rules := []obj{
-		{"action": "sniff"},
-		{"protocol": "dns", "action": "hijack-dns"},
+	// Names resolve to IPv4 only, so IPv6 here comes from a literal address or
+	// a resolver the tunnel does not see (WSL's, for one). Most servers have no
+	// IPv6; refusing it before the TCP handshake makes apps fall back to IPv4
+	// at once instead of hanging on a connection that goes nowhere.
+	serverIP, _ := netip.ParseAddr(l.Host)
+	noV6 := !serverIP.Is6()
+	var rules []obj
+	if noV6 {
+		rules = append(rules, obj{"ip_version": 6, "network": "tcp", "action": "reject"})
+	}
+	rules = append(rules,
+		obj{"action": "sniff"},
+		obj{"protocol": "dns", "action": "hijack-dns"},
 		// QUIC cannot ride the Vision flow; rejecting it makes apps fall back to TCP at once.
-		{"network": "udp", "port": 443, "action": "reject"},
+		obj{"network": "udp", "port": 443, "action": "reject"},
+	)
+	if noV6 {
+		rules = append(rules, obj{"ip_version": 6, "action": "reject"})
 	}
 	if ip, err := netip.ParseAddr(l.Host); err == nil {
 		// The server's own address means the server itself: SSH and its local

@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -105,6 +108,24 @@ func TestEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Logf("through the tunnel: %s", ip)
+
+	// Inner TLS 1.2 takes a different path through the Vision flow than 1.3.
+	l0 := s.link(s.Users[0])
+	l0.Host = "127.0.0.1"
+	sp, _ := freePort()
+	cli, err := startBox(context.Background(), clientConfig(l0, sp, os.DevNull))
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy, _ := url.Parse(fmt.Sprintf("socks5h://127.0.0.1:%d", sp))
+	hc := &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{
+		Proxy:           http.ProxyURL(proxy),
+		TLSClientConfig: &tls.Config{MaxVersion: tls.VersionTLS12},
+	}}
+	if _, err := publicIP(hc); err != nil {
+		t.Errorf("TLS 1.2 through the tunnel: %v", err)
+	}
+	cli.Close()
 
 	// A wrong key must not get through.
 	l := s.link(s.Users[0])

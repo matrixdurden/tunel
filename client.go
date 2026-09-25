@@ -159,7 +159,16 @@ func cmdStatus() error {
 	}
 	fmt.Printf("%s●%s on  %s\n", cGreen, cReset, ip)
 	fmt.Printf("%s  all traffic goes through the server · ssh %s%s\n", cDim, l.Name, cReset)
+	warnConflicts()
 	return nil
+}
+
+func warnConflicts() {
+	for _, name := range conflictingPrograms() {
+		fmt.Printf("\n%s⚠ %s is running.%s It rewrites outgoing packets, which breaks some\n", cYellow, name, cReset)
+		fmt.Printf("  connections through the tunnel (TLS 1.2 sites and apps). The tunnel already\n")
+		fmt.Printf("  gets around DPI, so close %s while tunel is on.\n", name)
+	}
 }
 
 // ---------- tunel remove ----------

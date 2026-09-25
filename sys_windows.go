@@ -507,6 +507,35 @@ func logTail(path string) string {
 	return "  " + strings.Join(lines, "\n  ")
 }
 
+// ---------- programs that break the tunnel ----------
+
+// DPI bypass tools rewrite outgoing packets with WinDivert: they split them
+// and add fakes that are meant to die on the way. The tunnel adapter has no
+// "way", so the fakes reach the tunnel and corrupt connections (TLS 1.2 fails).
+var packetRewriters = map[string]string{
+	"goodbyedpi.exe": "GoodbyeDPI",
+	"winws.exe":      "zapret",
+}
+
+func conflictingPrograms() []string {
+	snap, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
+	if err != nil {
+		return nil
+	}
+	defer windows.CloseHandle(snap)
+	var e windows.ProcessEntry32
+	e.Size = uint32(unsafe.Sizeof(e))
+	seen := map[string]bool{}
+	var found []string
+	for err = windows.Process32First(snap, &e); err == nil; err = windows.Process32Next(snap, &e) {
+		if name, ok := packetRewriters[strings.ToLower(windows.UTF16ToString(e.ExeFile[:]))]; ok && !seen[name] {
+			seen[name] = true
+			found = append(found, name)
+		}
+	}
+	return found
+}
+
 // ---------- the service itself ----------
 
 func runClientService() error {

@@ -48,6 +48,11 @@ func ownConsole() bool {
 	return false
 }
 
+// conflictingPrograms lists running programs known to break the tunnel.
+func conflictingPrograms() []string {
+	return nil
+}
+
 func isAdmin() bool {
 	return os.Geteuid() == 0
 }
