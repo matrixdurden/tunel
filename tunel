@@ -1,0 +1,516 @@
+#!/usr/bin/env bash
+# tunel: SSH and web through an Xray VLESS + Reality tunnel.
+set -Eeuo pipefail
+
+SRC="${BASH_SOURCE[0]:-}" # empty when piped into bash
+
+RAW="https://raw.githubusercontent.com/matrixdurden/tunel/main/tunel"
+XRAY_INSTALL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
+XRAY_RELEASE="https://github.com/XTLS/Xray-core/releases/latest/download"
+
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN*) WIN=1 ;;
+  *) WIN=0 ;;
+esac
+
+if (( WIN )); then
+  BIN="$HOME/bin/tunel"
+  CX="$HOME/.tunel/xray.exe"
+else
+  BIN="${XDG_BIN_HOME:-$HOME/.local/bin}/tunel"
+  CX="$HOME/.tunel/xray"
+fi
+DIR="$HOME/.tunel"
+UNIT="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/tunel.service"
+SSH_CONFIG="$HOME/.ssh/config"
+XRAY=/usr/local/bin/xray
+XRAY_CONFIG=/usr/local/etc/xray/config.json
+SOCKS=10808
+SSH_LOCAL=2222
+SNIS=(dl.google.com www.samsung.com www.nvidia.com addons.mozilla.org)
+
+RESET=$'\033[0m'
+BOLD=$'\033[1m'
+DIM=$'\033[2m'
+GREEN=$'\033[32m'
+YELLOW=$'\033[33m'
+RED=$'\033[31m'
+
+fail() {
+  printf '%s%serror:%s %s\n' "$BOLD" "$RED" "$RESET" "$*" >&2
+  exit 1
+}
+
+trap 'fail "line $LINENO: $BASH_COMMAND"' ERR
+
+have() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+ok() {
+  printf '  %s✓%s %s\n' "$GREEN" "$RESET" "$*"
+}
+
+bad() {
+  printf '  %s✗%s %s\n' "$RED" "$RESET" "$*"
+}
+
+self() {
+  readlink -f "$SRC"
+}
+
+is_wsl() {
+  (( ! WIN )) && grep -qi microsoft /proc/version 2>/dev/null
+}
+
+port_open() {
+  (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null
+}
+
+wait_port() {
+  local i
+  for ((i = 0; i < 25; i++)); do
+    port_open "$1" && return 0
+    sleep 0.2
+  done
+  return 1
+}
+
+# uuid host port sni pubkey shortid ssh-port socks-port ssh-local-port
+client_json() {
+  cat <<EOF
+{
+  "log": { "loglevel": "warning" },
+  "inbounds": [
+    { "listen": "127.0.0.1", "port": $8, "protocol": "socks", "settings": { "udp": false } },
+    { "listen": "127.0.0.1", "port": $9, "protocol": "dokodemo-door",
+      "settings": { "address": "127.0.0.1", "port": $7, "network": "tcp" } }
+  ],
+  "outbounds": [{
+    "protocol": "vless",
+    "settings": { "vnext": [{ "address": "$2", "port": $3,
+      "users": [{ "id": "$1", "flow": "xtls-rprx-vision", "encryption": "none" }] }] },
+    "streamSettings": { "network": "tcp", "security": "reality",
+      "realitySettings": { "serverName": "$4", "fingerprint": "chrome", "publicKey": "$5", "shortId": "$6" } }
+  }]
+}
+EOF
+}
+
+# uuid port sni privatekey shortid
+server_json() {
+  cat <<EOF
+{
+  "log": { "loglevel": "warning" },
+  "inbounds": [{
+    "port": $2,
+    "protocol": "vless",
+    "settings": { "clients": [{ "id": "$1", "flow": "xtls-rprx-vision" }], "decryption": "none" },
+    "streamSettings": { "network": "tcp", "security": "reality",
+      "realitySettings": { "dest": "$3:443", "serverNames": ["$3"], "privateKey": "$4", "shortIds": ["$5"] } }
+  }],
+  "outbounds": [{ "protocol": "freedom" }]
+}
+EOF
+}
+
+# ---------- server ----------
+
+server_ready() {
+  [[ -r "$XRAY_CONFIG" ]] && grep -q '"reality"' "$XRAY_CONFIG"
+}
+
+# prints: uuid port sni pubkey shortid
+server_get() {
+  python3 - "$XRAY_CONFIG" "$XRAY" <<'PY'
+import json, subprocess, sys
+c = json.load(open(sys.argv[1]))
+i = c["inbounds"][0]
+r = i["streamSettings"]["realitySettings"]
+out = subprocess.run([sys.argv[2], "x25519", "-i", r["privateKey"]], capture_output=True, text=True).stdout
+pub = next(l.split(":", 1)[1].strip() for l in out.splitlines() if l.lower().startswith(("public", "password")))
+print(i["settings"]["clients"][0]["id"], i["port"], r["serverNames"][0], pub, r["shortIds"][0])
+PY
+}
+
+server_set_sni() {
+  python3 - "$XRAY_CONFIG" "$1" <<'PY'
+import json, sys
+path, sni = sys.argv[1], sys.argv[2]
+c = json.load(open(path))
+r = c["inbounds"][0]["streamSettings"]["realitySettings"]
+r.pop("target", None)
+r["dest"], r["serverNames"] = sni + ":443", [sni]
+json.dump(c, open(path, "w"), indent=2)
+PY
+  systemctl restart xray
+}
+
+server_install() {
+  local port="$1" uuid keys priv sid
+
+  if ! have curl || ! have unzip || ! have python3; then
+    have apt-get || fail "curl, unzip and python3 are required"
+    apt-get update -qq && apt-get install -y -qq curl unzip python3 >/dev/null
+  fi
+  ss -Htln "sport = :$port" | grep -q . && fail "port $port is already in use"
+
+  [[ -x "$XRAY" ]] || bash -c "$(curl -fsSL "$XRAY_INSTALL")" @ install >/dev/null || true
+  [[ -x "$XRAY" ]] || fail "xray install failed"
+
+  uuid="$("$XRAY" uuid)"
+  keys="$("$XRAY" x25519)"
+  priv="$(awk -F': *' 'tolower($1) ~ /^private ?key/ { print $2; exit }' <<<"$keys")"
+  [[ -n "$priv" ]] || fail "could not read xray x25519 output"
+  sid="$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+
+  server_json "$uuid" "$port" "${SNIS[0]}" "$priv" "$sid" > "$XRAY_CONFIG"
+  systemctl enable xray >/dev/null 2>&1
+  systemctl restart xray
+}
+
+# Connects to the local server like a real client; prints the public IP on success.
+server_test() {
+  local tmp pid ip=""
+  tmp="$(mktemp -d)"
+  client_json "$1" 127.0.0.1 "$2" "$3" "$4" "$5" 22 18808 18222 > "$tmp/c.json"
+  "$XRAY" run -c "$tmp/c.json" >/dev/null 2>&1 &
+  pid=$!
+  if wait_port 18808; then
+    ip="$(curl -s -m 10 --socks5-hostname 127.0.0.1:18808 https://api.ipify.org || true)"
+  fi
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  rm -rf "$tmp"
+  [[ "$ip" =~ ^[0-9a-f.:]+$ ]] && printf '%s' "$ip"
+}
+
+sshd_port() {
+  local p
+  p="$(cat /etc/ssh/sshd_config.d/*.conf /etc/ssh/sshd_config 2>/dev/null | awk 'tolower($1) == "port" { print $2; exit }' || true)"
+  printf '%s' "${p:-22}"
+}
+
+cmd_server() {
+  local port="${1:-443}" uuid p sni pub sid ip="" s name
+
+  [[ "$(uname -s)" == Linux ]] || fail "the server needs Linux"
+  have systemctl || fail "systemd is required"
+
+  if ! server_ready; then
+    (( EUID == 0 )) || exec sudo "$(self)" server "$port"
+    server_install "$port"
+  fi
+
+  read -r uuid p sni pub sid < <(server_get)
+  ok "xray $("$XRAY" version | awk 'NR == 1 { print $2 }') :$p"
+
+  if ! ip="$(server_test "$uuid" "$p" "$sni" "$pub" "$sid")"; then
+    (( EUID == 0 )) || exec sudo "$(self)" server "$port"
+    bad "sni $sni"
+    for s in "${SNIS[@]}"; do
+      [[ "$s" == "$sni" ]] && continue
+      server_set_sni "$s"
+      if ip="$(server_test "$uuid" "$p" "$s" "$pub" "$sid")"; then
+        sni="$s"
+        break
+      fi
+      bad "sni $s"
+    done
+    [[ -n "$ip" ]] || fail "no working SNI; see: journalctl -u xray"
+  fi
+
+  name="${SUDO_USER:-$(id -un)}"
+  ok "sni $sni"
+  ok "self-test $ip"
+  ok "ssh $(sshd_port)"
+  printf "\n  tunel client 'vless://%s@%s:%s?encryption=none&flow=xtls-rprx-vision&security=reality&sni=%s&fp=chrome&pbk=%s&sid=%s&type=tcp&ssh=%s#%s'\n\n" \
+    "$uuid" "$ip" "$p" "$sni" "$pub" "$sid" "$(sshd_port)" "$name"
+}
+
+server_remove() {
+  (( EUID == 0 )) || fail "root required"
+  systemctl disable --now xray >/dev/null 2>&1 || true
+  bash -c "$(curl -fsSL "$XRAY_INSTALL")" @ remove --purge >/dev/null
+}
+
+# ---------- client ----------
+
+download_xray() {
+  local arch os=linux member=xray tmp sum
+  case "$(uname -m)" in
+    x86_64) arch=64 ;;
+    aarch64 | arm64) arch=arm64-v8a ;;
+    *) fail "unsupported CPU: $(uname -m)" ;;
+  esac
+  if (( WIN )); then
+    os=windows
+    member=xray.exe
+  fi
+  have unzip || fail "unzip is required"
+
+  tmp="$(mktemp -d)"
+  curl -fsSL "$XRAY_RELEASE/Xray-$os-$arch.zip" -o "$tmp/xray.zip" \
+    || fail "could not download xray (GitHub blocked? run once on another network)"
+  sum="$(curl -fsSL "$XRAY_RELEASE/Xray-$os-$arch.zip.dgst" | awk '$1 == "SHA2-256=" { print $2 }')"
+  [[ -n "$sum" && "$(sha256sum "$tmp/xray.zip" | cut -d' ' -f1)" == "$sum" ]] || fail "xray checksum mismatch"
+  unzip -qo "$tmp/xray.zip" "$member" -d "$DIR"
+  chmod 755 "$CX"
+  rm -rf "$tmp"
+}
+
+# ~/.ssh/config is rewritten in place, never replaced, so its permissions stay as they are
+# (Windows OpenSSH rejects a config that picks up a temp folder's ACL).
+ssh_unblock() {
+  local rest
+  [[ -f "$SSH_CONFIG" ]] || return 0
+  rest="$(sed '/^# >>> tunel$/,/^# <<< tunel$/d' "$SSH_CONFIG")"
+  printf '%s\n' "$rest" > "$SSH_CONFIG"
+}
+
+ssh_block() {
+  local name="$1" rest
+  mkdir -p "$HOME/.ssh"
+  chmod 700 "$HOME/.ssh"
+  touch "$SSH_CONFIG"
+  ssh_unblock
+  rest="$(cat "$SSH_CONFIG")"
+  {
+    printf '# >>> tunel\nHost %s\n  HostName 127.0.0.1\n  Port %s\n  User %s\n' "$name" "$SSH_LOCAL" "$name"
+    printf '  HostKeyAlias tunel-%s\n  StrictHostKeyChecking accept-new\n  ServerAliveInterval 30\n# <<< tunel\n' "$name"
+    printf '%s\n' "$rest"
+  } > "$SSH_CONFIG"
+  chmod 600 "$SSH_CONFIG"
+}
+
+client_ready() {
+  [[ -x "$CX" && -f "$DIR/config.json" ]] || return 1
+  (( WIN )) || [[ -f "$UNIT" ]]
+}
+
+# The tunnel process: a systemd user service on Linux, a hidden xray.exe on Windows.
+svc_active() {
+  if (( WIN )); then
+    [[ -f "$DIR/pid" ]] && tasklist //FI "PID eq $(cat "$DIR/pid")" //NH 2>/dev/null | grep -qi xray
+  else
+    systemctl --user is-active --quiet tunel
+  fi
+}
+
+svc_stop() {
+  if (( WIN )); then
+    if svc_active; then taskkill //F //PID "$(cat "$DIR/pid")" >/dev/null 2>&1 || true; fi
+    rm -f "$DIR/pid"
+  else
+    systemctl --user stop tunel >/dev/null 2>&1 || true
+  fi
+}
+
+svc_start() {
+  local w
+  svc_stop
+  port_open "$SOCKS" && fail "port $SOCKS is already in use by another program"
+  if (( WIN )); then
+    # xray inherits PowerShell's handles, so give it none that bash waits on
+    w="$(cygpath -w "$DIR")"
+    powershell.exe -NoProfile -Command "\$p = Start-Process -FilePath '$w\\xray.exe' -WorkingDirectory '$w' \
+      -ArgumentList 'run -c config.json' -WindowStyle Hidden -RedirectStandardOutput '$w\\xray.log' -PassThru; \
+      [IO.File]::WriteAllText('$w\\pid', \$p.Id)" </dev/null >/dev/null 2>&1
+  else
+    systemctl --user start tunel
+  fi
+}
+
+cmd_client() {
+  local link="${1:-}" re='^vless://([^@]+)@([^:/?]+):([0-9]+)\?([^#]*)#?(.*)$'
+  local uuid host port name kv parts
+  local -A q=()
+
+  [[ "$link" =~ $re ]] || fail "usage: tunel client 'vless://…'"
+  uuid="${BASH_REMATCH[1]}"
+  host="${BASH_REMATCH[2]}"
+  port="${BASH_REMATCH[3]}"
+  IFS='&' read -ra parts <<<"${BASH_REMATCH[4]}"
+  name="${BASH_REMATCH[5]}"
+  [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] || name=tunel
+  for kv in "${parts[@]}"; do q["${kv%%=*}"]="${kv#*=}"; done
+  [[ -n "${q[sni]:-}" && -n "${q[pbk]:-}" ]] || fail "the link has no sni or pbk"
+
+  (( WIN )) || have systemctl || fail "systemd is required"
+  mkdir -p "$DIR"
+  [[ -x "$CX" ]] || download_xray
+  ok "xray $("$CX" version | awk 'NR == 1 { print $2 }')"
+
+  client_json "$uuid" "$host" "$port" "${q[sni]}" "${q[pbk]}" "${q[sid]:-}" "${q[ssh]:-22}" "$SOCKS" "$SSH_LOCAL" > "$DIR/config.json"
+  "$CX" run -test -c "$DIR/config.json" >/dev/null || fail "invalid link"
+  printf '%s\n' "$name" > "$DIR/name"
+
+  if (( ! WIN )); then
+    mkdir -p "$(dirname "$UNIT")"
+    cat > "$UNIT" <<'EOF'
+[Unit]
+Description=tunel
+
+[Service]
+ExecStart=%h/.tunel/xray run -c %h/.tunel/config.json
+Restart=on-failure
+RestartSec=3
+EOF
+    systemctl --user daemon-reload
+  fi
+  ssh_block "$name"
+  ok "ssh $name"
+  cmd_on
+}
+
+cmd_on() {
+  client_ready || fail "not set up; run: tunel client 'vless://…'"
+  svc_start
+  wait_port "$SOCKS" || fail "tunnel did not start; see $( (( WIN )) && echo "$DIR/xray.log" || echo "journalctl --user -u tunel")"
+  status
+}
+
+cmd_off() {
+  svc_stop
+  status
+}
+
+winreg() {
+  MSYS_NO_PATHCONV=1 reg query "$@" 2>/dev/null | tr -d '\r' || true
+}
+
+# Windows path of the default browser, or of brave / chrome / edge.
+browser_exe() {
+  local progid
+  case "${1:-}" in
+    "") progid="$(winreg 'HKCU\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice' /v ProgId | awk '/ProgId/ { print $NF }')" ;;
+    brave) progid=BraveHTML ;;
+    chrome) progid=ChromeHTML ;;
+    edge) progid=MSEdgeHTM ;;
+    *) return 0 ;;
+  esac
+  winreg "HKCR\\$progid\\shell\\open\\command" /ve | sed -n 's/.*REG_SZ *"\([^"]*\)".*/\1/p'
+}
+
+cmd_web() {
+  local flags=(--proxy-server="socks5://127.0.0.1:$SOCKS" --proxy-bypass-list="<-loopback>" --no-first-run --no-default-browser-check)
+  local exe name profile b=""
+
+  is_wsl && fail "WSL's tunnel is not reachable from Windows browsers; run tunel web on Windows"
+  svc_active || cmd_on >/dev/null
+  if (( WIN )); then
+    exe="$(browser_exe "${1:-}")"
+    [[ -n "$exe" ]] || fail "browser not found${1:+: $1} (use brave, chrome or edge)"
+    name="$(basename "${exe//\\//}" .exe)"
+    profile="$DIR/web/$name"
+    mkdir -p "$profile"
+    if [[ "${name,,}" == firefox ]]; then
+      printf 'user_pref("network.proxy.type", 1);\nuser_pref("network.proxy.socks", "127.0.0.1");\nuser_pref("network.proxy.socks_port", %s);\nuser_pref("network.proxy.socks_remote_dns", true);\n' \
+        "$SOCKS" > "$profile/user.js"
+      flags=(-no-remote -profile "$(cygpath -w "$profile")")
+    else
+      flags=(--user-data-dir="$(cygpath -w "$profile")" "${flags[@]}")
+    fi
+    ("$(cygpath -u "$exe")" "${flags[@]}" >/dev/null 2>&1 &)
+  else
+    for b in ${1:-} brave-browser chromium chromium-browser google-chrome microsoft-edge; do have "$b" && break; b=""; done
+    [[ -n "$b" ]] || fail "no Chromium-based browser found; use SOCKS5 127.0.0.1:$SOCKS"
+    ("$b" --user-data-dir="$DIR/web/$b" "${flags[@]}" >/dev/null 2>&1 &)
+  fi
+  ok "${name:-$b} through the tunnel"
+}
+
+# ---------- common ----------
+
+status() {
+  local ip
+  if client_ready; then
+    if svc_active; then
+      ip="$(curl -s -m 8 --socks5-hostname "127.0.0.1:$SOCKS" https://api.ipify.org || true)"
+      if [[ -n "$ip" ]]; then
+        printf '%s●%s on  %s\n' "$GREEN" "$RESET" "$ip"
+      else
+        printf '%s●%s on  %sno route to server%s\n' "$YELLOW" "$RESET" "$YELLOW" "$RESET"
+      fi
+      printf '%s  ssh %s · socks5 127.0.0.1:%s%s\n' "$DIM" "$(cat "$DIR/name")" "$SOCKS" "$RESET"
+    else
+      printf '%s○%s off\n' "$YELLOW" "$RESET"
+    fi
+  elif server_ready; then
+    local _ p sni
+    read -r _ p sni _ _ < <(server_get)
+    if systemctl is-active --quiet xray; then
+      printf '%s●%s server :%s  %s\n' "$GREEN" "$RESET" "$p" "$sni"
+    else
+      printf '%s○%s server stopped\n' "$YELLOW" "$RESET"
+    fi
+    printf '%s  tunel server  prints the client link%s\n' "$DIM" "$RESET"
+  else
+    usage
+  fi
+}
+
+cmd_remove() {
+  if server_ready; then
+    if (( EUID == 0 )); then server_remove; else sudo "$(self)" __remove-server; fi
+    ok "server"
+  fi
+  if [[ -d "$DIR" ]]; then
+    svc_stop
+    if (( ! WIN )); then
+      rm -f "$UNIT"
+      systemctl --user daemon-reload 2>/dev/null || true
+    fi
+    ssh_unblock
+    rm -rf "$DIR" 2>/dev/null || fail "close the tunel web browser, then run tunel remove again"
+    ok "client"
+  fi
+  rm -f "$BIN" "$BIN.cmd"
+  ok "removed $BIN"
+}
+
+install_self() {
+  local dir
+  dir="$(dirname "$BIN")"
+  mkdir -p "$dir"
+  if [[ -f "$SRC" ]]; then cp "$SRC" "$BIN.tmp"; else curl -fsSL "$RAW" -o "$BIN.tmp"; fi
+  chmod 755 "$BIN.tmp"
+  mv -f "$BIN.tmp" "$BIN"
+  if (( WIN )); then
+    # lets cmd and PowerShell run tunel through Git Bash; "(goto)" ends the batch before
+    # bash runs, so cmd never rereads this file after `tunel remove` deletes it
+    printf '@(goto) 2>nul & "%s\\bin\\bash.exe" "%%~dp0tunel" %%*\r\n' "$(cygpath -w / | sed 's/\\$//')" > "$BIN.cmd"
+  fi
+  echo "Installed tunel to $BIN"
+  case ":$PATH:" in
+    *":$dir:"*) ;;
+    *) echo "Add $dir to PATH to run tunel from any directory." ;;
+  esac
+}
+
+usage() {
+  cat <<EOF
+tunel server        set up this machine as the server
+tunel client LINK   set up this machine as a client
+tunel on | off      start or stop the tunnel
+tunel web [NAME]    open the default browser, or brave/chrome/edge, through the tunnel
+tunel remove        remove everything tunel added
+EOF
+}
+
+main() {
+  case "${1:-}" in
+    "") if [[ -f "$SRC" ]]; then status; else install_self; fi ;;
+    install) install_self ;;
+    server) shift; cmd_server "$@" ;;
+    client) shift; cmd_client "$@" ;;
+    on) cmd_on ;;
+    off) cmd_off ;;
+    web) shift; cmd_web "$@" ;;
+    remove) cmd_remove ;;
+    __remove-server) server_remove ;;
+    *) usage; exit 1 ;;
+  esac
+}
+
+main "$@"
