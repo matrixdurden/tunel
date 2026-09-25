@@ -1,74 +1,60 @@
 # tunel
 
-`tunel` reaches your own server over SSH and the web from networks that block SSH. It runs [Xray](https://github.com/XTLS/Xray-core) VLESS + Reality, so the connection looks like ordinary HTTPS to a well-known site.
+`tunel` sends a whole computer's traffic through your own server. To the network in between it looks like ordinary HTTPS to a well-known site (VLESS + Reality), so networks that block VPNs or SSH let it through.
 
-One bash file for Linux and for Windows with Git Bash. No config file, no system proxy, no admin rights on the client.
+## 1. Server
 
-## Install
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/matrixdurden/tunel/main/tunel | bash
-```
-
-This puts `tunel` in `$XDG_BIN_HOME` or `~/.local/bin`; on Windows, in `~/bin` next to a `tunel.cmd` for PowerShell and cmd. Run it once on the server and once on each client.
-
-## Server
+On a Linux machine with systemd that the internet reaches on TCP port 443:
 
 ```sh
-tunel server
+curl -fsSL https://raw.githubusercontent.com/matrixdurden/tunel/main/install.sh | sh -s -- server
 ```
 
-It asks for `sudo` once, installs Xray on port 443, picks a Reality SNI that works, tests itself, and prints the command for the client:
+It asks for your sudo password, sets everything up, tests itself and prints a link.
 
-```text
-  ✓ xray 26.3.27 :443
-  ✓ sni dl.google.com
-  ✓ self-test 203.0.113.7
-  ✓ ssh 22
+## 2. Computers
 
-  tunel client 'vless://…'
+**Windows**: open PowerShell, run this and paste the link when asked:
+
+```powershell
+irm https://raw.githubusercontent.com/matrixdurden/tunel/main/install.ps1 | iex
 ```
 
-Run `tunel server` again at any time to print the command again. Pass a port to use one other than 443: `tunel server 8443`. Port 443 must reach the server over TCP; UDP is not needed.
-
-## Client
-
-Paste the command the server printed:
+**Linux**:
 
 ```sh
-tunel client 'vless://…'
+curl -fsSL https://raw.githubusercontent.com/matrixdurden/tunel/main/install.sh | sh -s -- client 'vless://…'
 ```
 
-Then:
+The link is checked before anything is changed. Windows asks for administrator permission once.
+
+## Use
 
 ```sh
-tunel             # ● on 203.0.113.7  /  ○ off
-tunel on          # start the tunnel
-tunel off         # stop the tunnel
-tunel web         # open the default browser through the tunnel
-tunel web brave   # or brave, chrome, edge
-ssh NAME          # NAME is the server user, shown by `tunel`
+tunel on        # all traffic goes through the server
+tunel off       # back to the normal connection
+tunel           # ● on 203.0.113.7  /  ○ off
+ssh NAME        # the server's SSH; NAME is shown by `tunel`
 ```
 
-While the tunnel is on:
+On Windows `tunel on` and `tunel off` need no administrator permission. WSL uses the Windows tunnel automatically.
 
-- `ssh NAME` reaches the server's SSH through `127.0.0.1:2222`.
-- `127.0.0.1:10808` is a SOCKS5 proxy that exits from the server.
-- `tunel web` opens the browser with its own profile in `~/.tunel/web`, so your normal browser window stays off the tunnel. In that window, `127.0.0.1` means the server, so its local-only web apps open too.
+While the tunnel is on, browsers, games and DNS all go through the server; your local network (router, printer, `192.168.x.x`) does not. The server's own IP address reaches the server itself, so `ssh NAME` and web apps that listen only on the server's `127.0.0.1` work. Speed is capped by the server's upload speed.
 
-Nothing else on the machine goes through the tunnel. Other apps can use the SOCKS5 proxy if they have a proxy setting.
+After a reboot the tunnel is off until `tunel on`. If the tunnel crashes, the computer falls back to its normal connection at once.
 
-On Linux the tunnel is a systemd user service. On Windows it is a hidden `xray.exe` that `tunel off` stops.
+## Users
 
-## Windows and WSL
+On the server:
 
-Windows and WSL each need their own client. WSL's localhost forwarding is not reliable enough to share one tunnel, and both can run at the same time. Run `tunel web` on Windows. In WSL, the tunnel stops when WSL shuts down; run `tunel on` again.
+```sh
+sudo tunel add ali     # prints a link for ali
+sudo tunel del ali     # ali's link stops working
+sudo tunel users
+sudo tunel link ali    # prints ali's link again
+```
 
-## Requirements
-
-- Linux with systemd, `curl`, and `unzip`; the server also needs `python3`.
-- Windows with [Git for Windows](https://gitforwindows.org). To run `tunel` from PowerShell or cmd, add `%USERPROFILE%\bin` to `PATH`.
-- The client downloads Xray from GitHub once. If GitHub is blocked where you are, run `tunel client` on another network, or through a proxy you already have: `ALL_PROXY=socks5h://HOST:PORT tunel client …`.
+The link is a standard `vless://` link, so phone apps such as Hiddify or v2rayNG accept it too.
 
 ## Remove
 
@@ -76,4 +62,17 @@ Windows and WSL each need their own client. WSL's localhost forwarding is not re
 tunel remove
 ```
 
-It stops the tunnel and removes everything tunel added: Xray and its config on a server; the `~/.tunel` folder, the user service, the marked block in `~/.ssh/config`, and the browser profile on a client; then `tunel` itself.
+Removes everything tunel added: the service, the network adapter, the settings, the `PATH` entry, its block in `~/.ssh/config`, and tunel itself. On a server it also removes the server and its keys.
+
+## Build
+
+With Go:
+
+```sh
+./build.sh      # dist/: Linux and Windows, amd64 and arm64, and checksums.txt
+go test -tags with_utls,with_gvisor,badlinkname,tfogo_checklinkname0 -ldflags=-checklinkname=0 .
+```
+
+Pushing a `v*` tag builds and publishes a release, which the install scripts download.
+
+The tunnel engine is [sing-box](https://github.com/SagerNet/sing-box), built in. Like sing-box, tunel is licensed under the GPL-3.0.
