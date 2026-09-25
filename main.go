@@ -34,7 +34,13 @@ func usage() {
 
 func main() {
 	setupConsole()
-	args := os.Args[1:]
+	// Commands pasted from Windows can carry a trailing \r into a Linux shell.
+	var args []string
+	for _, a := range os.Args[1:] {
+		if a = strings.TrimSpace(a); a != "" {
+			args = append(args, a)
+		}
+	}
 	cmd := ""
 	if len(args) > 0 {
 		cmd, args = args[0], args[1:]
