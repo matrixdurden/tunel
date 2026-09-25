@@ -1,8 +1,13 @@
 # tunel
 
-`tunel` sends a whole computer's traffic through your own server. To the network in between it looks like ordinary HTTPS to a well-known site (VLESS + Reality), so networks that block VPNs or SSH let it through.
+`tunel` gets a whole computer past network blocks, in one of two modes:
 
-## 1. Server
+- **`tunel on`**: all traffic goes through your own server. To the network in between it looks like ordinary HTTPS to a well-known site (VLESS + Reality), so networks that block VPNs or SSH let it through.
+- **`tunel dpi`**: no server. Traffic leaves over your own connection, but DNS is asked over HTTPS and every TLS handshake is split into several records, so a DPI filter can neither poison names nor read which site you open.
+
+A server in a censored country meets the same filter on its way out, so it splits handshakes and asks DNS over HTTPS too.
+
+## 1. Server (only for `tunel on`)
 
 On a Linux machine with systemd that the internet reaches on TCP port 443:
 
@@ -14,7 +19,7 @@ It asks for your sudo password, sets everything up, tests itself and prints a li
 
 ## 2. Computers
 
-**Windows**: open PowerShell, run this and paste the link when asked:
+**Windows**: open PowerShell, run this, and paste the link when asked, or press Enter for `tunel dpi` only:
 
 ```powershell
 irm https://raw.githubusercontent.com/matrixdurden/tunel/main/install.ps1 | iex
@@ -24,24 +29,28 @@ irm https://raw.githubusercontent.com/matrixdurden/tunel/main/install.ps1 | iex
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/matrixdurden/tunel/main/install.sh | sh -s -- client 'vless://…'
+curl -fsSL https://raw.githubusercontent.com/matrixdurden/tunel/main/install.sh | sh -s -- dpi
 ```
 
-The link is checked before anything is changed. Windows asks for administrator permission once.
+A link is checked before anything is changed. Windows asks for administrator permission once; you can add a link later with `tunel client`.
 
 ## Use
 
 ```sh
 tunel on        # all traffic goes through the server
+tunel dpi       # your own connection, past DPI blocks
 tunel off       # back to the normal connection
-tunel           # ● on 203.0.113.7  /  ○ off
+tunel           # ● on 203.0.113.7  /  ● dpi 198.51.100.4  /  ○ off
 ssh NAME        # the server's SSH; NAME is shown by `tunel`
 ```
 
-On Windows `tunel on` and `tunel off` need no administrator permission. WSL uses the Windows tunnel automatically.
+`tunel on` and `tunel dpi` switch between each other directly. On Windows none of them need administrator permission. WSL uses the Windows tunnel automatically.
 
-While the tunnel is on, browsers, games and DNS all go through the server; your local network (router, printer, `192.168.x.x`) does not. The server's own IP address reaches the server itself, so `ssh NAME` and web apps that listen only on the server's `127.0.0.1` work. Speed is capped by the server's upload speed.
+Your local network (router, printer, `192.168.x.x`) never goes through the tunnel. With `tunel on`, the server's own IP address reaches the server itself, so `ssh NAME` and web apps that listen only on the server's `127.0.0.1` work, and speed is capped by the server's upload speed.
 
-After a reboot the tunnel is off until `tunel on`. If the tunnel crashes, the computer falls back to its normal connection at once.
+After a reboot the tunnel is off until you turn it on. If it crashes, the computer falls back to its normal connection at once.
+
+Close GoodbyeDPI or zapret before using tunel: they add fake packets that break connections through the tunnel, and `tunel dpi` does their job. `tunel` warns when they run.
 
 ## Users
 

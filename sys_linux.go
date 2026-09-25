@@ -21,6 +21,7 @@ const (
 	isLinux         = true
 	installedBin    = linuxBin
 	clientStatePath = "/etc/tunel/client.json"
+	clientModePath  = "/etc/tunel/mode"
 	clientUnitPath  = "/etc/systemd/system/tunel.service"
 	clientUnit      = "tunel"
 	clientLogHint   = "journalctl -u tunel"
@@ -139,7 +140,7 @@ func installClient() error {
 
 func uninstallClient() error {
 	exec.Command("systemctl", "stop", clientUnit).Run()
-	for _, p := range []string{clientUnitPath, clientStatePath} {
+	for _, p := range []string{clientUnitPath, clientStatePath, clientModePath} {
 		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
@@ -169,8 +170,15 @@ func svcControl(op string) error {
 	return asAdmin(op)
 }
 
-func svcStart() error {
-	if err := systemctl("start", clientUnit); err != nil {
+// svcStart starts the service in mode, switching if it runs in the other one.
+func svcStart(mode string) error {
+	if svcRunning() && currentMode() == mode {
+		return nil
+	}
+	if err := writeFileAtomic(clientModePath, []byte(mode+"\n"), 0o644); err != nil {
+		return err
+	}
+	if err := systemctl("restart", clientUnit); err != nil {
 		return err
 	}
 	// The unit reports active at once; give sing-box a moment to fail if it will.
@@ -190,7 +198,7 @@ func svcStop() error {
 }
 
 func runClientService() error {
-	b, err := startTunnel("")
+	b, err := startTunnel(currentMode(), "")
 	if err != nil {
 		return err
 	}

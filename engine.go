@@ -62,20 +62,7 @@ func clientConfig(l Link, socksPort int, logPath string) obj {
 		return cfg
 	}
 
-	// gVisor on Windows: the system stack needs a firewall exception there.
-	stack := "mixed"
-	if runtime.GOOS == "windows" {
-		stack = "gvisor"
-	}
-	cfg["inbounds"] = []obj{{
-		"type": "tun", "tag": "tun",
-		"interface_name":        tunName,
-		"address":               []string{"198.18.0.1/30", "fdfe:dcba:9876::1/126"},
-		"auto_route":            true,
-		"strict_route":          true,
-		"route_exclude_address": lanRanges,
-		"stack":                 stack,
-	}}
+	cfg["inbounds"] = []obj{tunInbound()}
 	cfg["dns"] = obj{
 		"servers": []obj{
 			// DNS goes through the tunnel too, so the local network never sees names.
@@ -126,6 +113,75 @@ func clientConfig(l Link, socksPort int, logPath string) obj {
 	return cfg
 }
 
+// tunInbound takes over the machine's routing; its routes and firewall rules
+// go away with the adapter.
+func tunInbound() obj {
+	// gVisor on Windows: the system stack needs a firewall exception there.
+	stack := "mixed"
+	if runtime.GOOS == "windows" {
+		stack = "gvisor"
+	}
+	return obj{
+		"type": "tun", "tag": "tun",
+		"interface_name":        tunName,
+		"address":               []string{"198.18.0.1/30", "fdfe:dcba:9876::1/126"},
+		"auto_route":            true,
+		"strict_route":          true,
+		"route_exclude_address": lanRanges,
+		"stack":                 stack,
+	}
+}
+
+// dpiRule splits every TLS handshake into several TLS records.
+var dpiRule = obj{"protocol": "tls", "action": "route-options", "tls_record_fragment": true}
+
+// dpiConfig needs no server: traffic leaves directly, with the two things
+// that get past a DPI filter like the Turkish ISPs' one. DNS is asked over
+// HTTPS, so no blocked answers; and every TLS handshake is split into several
+// TLS records, so the filter cannot read the site name (SNI). Of fragment,
+// record fragment and spoof, only record fragment got through there, and it
+// costs nothing. With a socksPort it opens a local proxy instead (for tests).
+func dpiConfig(socksPort int, logPath string) obj {
+	cfg := obj{
+		"log":       logOptions(logPath),
+		"outbounds": []obj{{"type": "direct", "tag": "direct"}},
+		"dns": obj{
+			"servers":  []obj{{"type": "https", "tag": "doh", "server": "1.1.1.1"}},
+			"final":    "doh",
+			"strategy": "ipv4_only",
+		},
+	}
+	var rules []obj
+	if socksPort != 0 {
+		cfg["inbounds"] = []obj{{"type": "mixed", "tag": "socks", "listen": "127.0.0.1", "listen_port": socksPort}}
+		rules = append(rules, obj{"action": "sniff"})
+	} else {
+		cfg["inbounds"] = []obj{tunInbound()}
+		rules = append(rules,
+			// As in server mode: IPv6 that slips past the IPv4-only DNS is
+			// refused before the handshake, so apps fall back to IPv4 at once.
+			obj{"ip_version": 6, "network": "tcp", "action": "reject"},
+			obj{"action": "sniff"},
+			obj{"protocol": "dns", "action": "hijack-dns"},
+			// QUIC carries the site name where this cannot split it; without
+			// QUIC, browsers use TCP, where it can.
+			obj{"network": "udp", "port": 443, "action": "reject"},
+			obj{"ip_version": 6, "action": "reject"},
+		)
+	}
+	rules = append(rules, dpiRule)
+	route := obj{
+		"rules":                   rules,
+		"final":                   "direct",
+		"default_domain_resolver": "doh",
+	}
+	if socksPort == 0 {
+		route["auto_detect_interface"] = true
+	}
+	cfg["route"] = route
+	return cfg
+}
+
 func serverConfig(s *ServerState, logPath string) obj {
 	users := make([]obj, 0, len(s.Users))
 	for _, u := range s.Users {
@@ -148,6 +204,18 @@ func serverConfig(s *ServerState, logPath string) obj {
 			},
 		}},
 		"outbounds": []obj{{"type": "direct", "tag": "direct"}},
+		// A server in a censored country meets the same filter on its way
+		// out, so it uses the DPI mode's tricks too: names over HTTPS, TLS
+		// handshakes split into records.
+		"dns": obj{
+			"servers":  []obj{{"type": "https", "tag": "doh", "server": "1.1.1.1"}},
+			"strategy": "ipv4_only",
+		},
+		"route": obj{
+			"rules":                   []obj{{"action": "sniff"}, dpiRule},
+			"final":                   "direct",
+			"default_domain_resolver": "doh",
+		},
 	}
 }
 

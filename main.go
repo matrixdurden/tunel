@@ -22,6 +22,7 @@ server (Linux):
 client (Windows, Linux):
   tunel client [LINK]     set up this computer with a link from the server
   tunel on                send all traffic through the server
+  tunel dpi               no server: your own connection, past DPI blocks
   tunel off               back to the normal connection
   tunel                   show status
 
@@ -52,9 +53,9 @@ func main() {
 	case "":
 		if ownConsole() {
 			// Double-clicked tunel.exe: set up if needed, then keep the window open.
-			if clientInstalled() {
+			if serviceExists() {
 				err = cmdStatus()
-				fmt.Println("\n  Run tunel on / tunel off in a terminal, or tunel remove to uninstall.")
+				fmt.Println("\n  In a terminal: tunel on / tunel dpi / tunel off, or tunel remove to uninstall.")
 			} else {
 				err = cmdClient(nil)
 			}
@@ -77,6 +78,8 @@ func main() {
 		err = cmdClient(args)
 	case "on":
 		err = cmdOn()
+	case "dpi":
+		err = cmdDPI()
 	case "off":
 		err = cmdOff()
 	case "remove", "uninstall":
@@ -179,7 +182,9 @@ func runAdmin(args []string) error {
 	case "client-install":
 		return adminClientInstall(args)
 	case "on":
-		return svcStart()
+		return svcStart(modeServer)
+	case "dpi":
+		return adminDPI()
 	case "off":
 		return svcStop()
 	case "remove":

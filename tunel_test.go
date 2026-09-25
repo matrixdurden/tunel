@@ -81,6 +81,35 @@ func TestClientConfigParses(t *testing.T) {
 	if err := checkConfig(serverConfig(s, "")); err != nil {
 		t.Errorf("server: %v", err)
 	}
+	for _, socks := range []int{0, 1080} {
+		if err := checkConfig(dpiConfig(socks, "")); err != nil {
+			t.Errorf("dpi socks=%d: %v", socks, err)
+		}
+	}
+}
+
+// TestDPIDirect checks that DPI mode's DNS over HTTPS and TLS record
+// splitting leave ordinary sites working. It needs internet access.
+func TestDPIDirect(t *testing.T) {
+	if testing.Short() {
+		t.Skip("needs internet")
+	}
+	port, _ := freePort()
+	b, err := startBox(context.Background(), dpiConfig(port, os.DevNull))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	proxy, _ := url.Parse(fmt.Sprintf("socks5h://127.0.0.1:%d", port))
+	for _, max := range []uint16{tls.VersionTLS13, tls.VersionTLS12} {
+		hc := &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{
+			Proxy:           http.ProxyURL(proxy),
+			TLSClientConfig: &tls.Config{MaxVersion: max},
+		}}
+		if _, err := publicIP(hc); err != nil {
+			t.Errorf("TLS max %x: %v", max, err)
+		}
+	}
 }
 
 // TestEndToEnd runs a real server and a real client on this machine and

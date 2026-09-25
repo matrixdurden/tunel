@@ -30,7 +30,7 @@ func serverInstalled() bool {
 }
 
 func cmdUpdate() error {
-	if !clientInstalled() && !serverInstalled() {
+	if !serviceExists() && !serverInstalled() {
 		return fmt.Errorf("tunel is not set up on this computer; see %s", "https://github.com/matrixdurden/tunel")
 	}
 	latest, err := latestTag()
@@ -75,7 +75,7 @@ func cmdUpdate() error {
 		return err
 	}
 	ok("updated %s → %s", current, latest)
-	if clientInstalled() {
+	if serviceExists() {
 		fmt.Println()
 		return cmdStatus()
 	}
@@ -91,7 +91,7 @@ func adminUpgrade(args []string) error {
 	if got, err := sha256File(file); err != nil || got != want {
 		return fmt.Errorf("checksum mismatch; nothing was changed")
 	}
-	wasOn := clientInstalled() && svcRunning()
+	wasOn, mode := serviceExists() && svcRunning(), currentMode()
 	if wasOn {
 		if err := svcStop(); err != nil {
 			return err
@@ -99,12 +99,12 @@ func adminUpgrade(args []string) error {
 	}
 	if err := installFile(file, installedBin); err != nil {
 		if wasOn {
-			svcStart()
+			svcStart(mode)
 		}
 		return err
 	}
 	if wasOn {
-		if err := svcStart(); err != nil {
+		if err := svcStart(mode); err != nil {
 			return err
 		}
 	}

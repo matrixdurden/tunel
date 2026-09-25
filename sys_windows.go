@@ -40,6 +40,7 @@ var (
 	clientStatePath = filepath.Join(dataDir, "client.json")
 	clientLogPath   = filepath.Join(dataDir, "tunel.log")
 	clientLogHint   = clientLogPath
+	clientModePath  = filepath.Join(dataDir, "mode") // written by the service
 	wintunMarker    = filepath.Join(dataDir, "wintun-installed-by-tunel")
 )
 
@@ -215,6 +216,9 @@ func copyFile(src, dst string) error {
 
 func installClient() error {
 	if err := installSelf(installedBin); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dataDir, 0o755); err != nil { // DPI-only has no client.json to create it
 		return err
 	}
 	if _, err := os.Stat(wintunMarker); err != nil && !serviceExists() && len(wintunDrivers()) == 0 {
@@ -446,22 +450,32 @@ func svcRunning() bool {
 }
 
 func svcControl(op string) error {
-	if op == "on" {
-		return svcStart()
+	switch op {
+	case "on":
+		return svcStart(modeServer)
+	case "dpi":
+		return svcStart(modeDPI)
 	}
 	return svcStop()
 }
 
-func svcStart() error {
+// svcStart starts the service in mode, switching if it runs in the other one.
+// The mode travels as a start argument, which signed-in users may pass.
+func svcStart(mode string) error {
+	if svcRunning() {
+		if currentMode() == mode {
+			return nil
+		}
+		if err := svcStop(); err != nil {
+			return err
+		}
+	}
 	s, done, err := openService(windows.SERVICE_START | windows.SERVICE_QUERY_STATUS)
 	if err != nil {
-		return fmt.Errorf("the tunel service is missing; run: tunel client 'vless://…'")
+		return fmt.Errorf("the tunel service is missing; run: tunel client")
 	}
 	defer done()
-	if st, _ := s.Query(); st.State == svc.Running {
-		return nil
-	}
-	if err := s.Start(); err != nil && !errors.Is(err, windows.ERROR_SERVICE_ALREADY_RUNNING) {
+	if err := s.Start(mode); err != nil && !errors.Is(err, windows.ERROR_SERVICE_ALREADY_RUNNING) {
 		return err
 	}
 	for i := 0; i < 150; i++ {
@@ -547,9 +561,16 @@ func runClientService() error {
 
 type winService struct{}
 
-func (winService) Execute(_ []string, req <-chan svc.ChangeRequest, st chan<- svc.Status) (bool, uint32) {
+func (winService) Execute(args []string, req <-chan svc.ChangeRequest, st chan<- svc.Status) (bool, uint32) {
 	st <- svc.Status{State: svc.StartPending}
-	b, err := startTunnel(clientLogPath)
+	// args[0] is the service name; a restart after a crash brings no mode, so
+	// the last one is used.
+	mode := currentMode()
+	if len(args) > 1 && (args[1] == modeServer || args[1] == modeDPI) {
+		mode = args[1]
+	}
+	os.WriteFile(clientModePath, []byte(mode+"\n"), 0o644)
+	b, err := startTunnel(mode, clientLogPath)
 	if err != nil {
 		appendLog(clientLogPath, "tunel: "+err.Error())
 		return true, 1
