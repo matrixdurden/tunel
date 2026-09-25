@@ -2,8 +2,9 @@
 #
 #   irm https://raw.githubusercontent.com/matrixdurden/tunel/main/install.ps1 | iex
 #
-# It asks for the link from your server. tunel installs itself to
-# C:\Program Files\tunel; `tunel remove` takes everything away again.
+# It asks for the link from your server; if tunel is already set up it
+# updates it instead. tunel installs itself to C:\Program Files\tunel;
+# `tunel remove` takes everything away again.
 
 & {
     $ErrorActionPreference = 'Stop'
@@ -25,7 +26,8 @@
         $got = (Get-FileHash $exe -Algorithm SHA256).Hash
         if (-not $want -or $got -ne $want) { throw "checksum mismatch; nothing was installed" }
 
-        & $exe client
+        $installed = Test-Path (Join-Path $env:ProgramData 'tunel\client.json')
+        if ($installed) { & $exe update } else { & $exe client }
         if ($LASTEXITCODE -eq 0) {
             # New terminals find tunel through PATH; make this one find it too.
             $dir = Join-Path $env:ProgramFiles 'tunel'

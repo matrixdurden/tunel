@@ -56,6 +56,14 @@ sudo tunel link ali    # prints ali's link again
 
 The link is a standard `vless://` link, so phone apps such as Hiddify or v2rayNG accept it too.
 
+## Update
+
+```sh
+tunel update
+```
+
+Installs the latest release if there is a newer one, checks its checksum, and restarts what was running. Keys, users and links stay as they are. Running the install command again does the same.
+
 ## Remove
 
 ```sh

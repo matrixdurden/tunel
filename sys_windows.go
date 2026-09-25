@@ -159,14 +159,19 @@ func runElevated(args []string) error {
 
 // ---------- install / uninstall ----------
 
-// installSelf copies the running binary to dst. A running old copy cannot be
-// overwritten on Windows but can be renamed, so it is moved aside first.
+// installSelf copies the running binary to dst.
 func installSelf(dst string) error {
 	exe, err := os.Executable()
 	if err != nil {
 		return err
 	}
-	if a, errA := os.Stat(exe); errA == nil {
+	return installFile(exe, dst)
+}
+
+// installFile copies src to dst. A running old copy cannot be overwritten on
+// Windows but can be renamed, so it is moved aside and deleted once it exits.
+func installFile(src, dst string) error {
+	if a, errA := os.Stat(src); errA == nil {
 		if b, errB := os.Stat(dst); errB == nil && os.SameFile(a, b) {
 			return nil
 		}
@@ -181,11 +186,13 @@ func installSelf(dst string) error {
 			return err
 		}
 	}
-	if err := copyFile(exe, dst); err != nil {
+	if err := copyFile(src, dst); err != nil {
 		os.Rename(old, dst)
 		return err
 	}
-	os.Remove(old) // fails while the old one still runs; `tunel remove` deletes the folder anyway
+	if err := os.Remove(old); err != nil && !errors.Is(err, os.ErrNotExist) {
+		deleteLater(old) // still running, very likely as this very process
+	}
 	return nil
 }
 
@@ -341,14 +348,21 @@ func removeInstalledBin() error {
 	}
 	// A running .exe cannot delete itself; a detached cmd does it once this
 	// process and the unelevated one that started it have exited.
-	return deleteLater(installDir, 3)
+	return deleteLater(installDir)
 }
 
-func deleteLater(dir string, seconds int) error {
+// deleteLater removes a file or folder that a running process still holds:
+// a detached cmd retries every second for half a minute.
+func deleteLater(p string) error {
+	del := fmt.Sprintf(`del /f /q "%s"`, p)
+	if fi, err := os.Stat(p); err == nil && fi.IsDir() {
+		del = fmt.Sprintf(`rd /s /q "%s"`, p)
+	}
 	cmd := exec.Command("cmd.exe")
 	// cmd.exe does not understand Go's \" escaping, so pass the line verbatim.
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-		CmdLine:       fmt.Sprintf(`cmd.exe /d /c ping -n %d 127.0.0.1 >nul & rd /s /q "%s"`, seconds+1, dir),
+		CmdLine: fmt.Sprintf(`cmd.exe /d /c for /l %%i in (1,1,30) do (ping -n 2 127.0.0.1 >nul & %s 2>nul & if not exist "%s" exit)`,
+			del, p),
 		CreationFlags: windows.CREATE_NO_WINDOW | windows.DETACHED_PROCESS,
 	}
 	return cmd.Start()

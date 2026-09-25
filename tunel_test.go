@@ -115,6 +115,30 @@ func TestEndToEnd(t *testing.T) {
 	}
 }
 
+func TestChecksumFor(t *testing.T) {
+	sums := filepath.Join(t.TempDir(), "checksums.txt")
+	os.WriteFile(sums, []byte("AA11  tunel-linux-amd64\nbb22 *tunel-windows-amd64.exe\n"), 0o644)
+	for asset, want := range map[string]string{"tunel-linux-amd64": "aa11", "tunel-windows-amd64.exe": "bb22"} {
+		if got, err := checksumFor(sums, asset); err != nil || got != want {
+			t.Errorf("%s: %q %v", asset, got, err)
+		}
+	}
+	if _, err := checksumFor(sums, "tunel-linux-arm64"); err == nil {
+		t.Error("missing asset accepted")
+	}
+}
+
+func TestLatestTag(t *testing.T) {
+	if testing.Short() {
+		t.Skip("needs internet")
+	}
+	tag, err := latestTag()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("latest release: %s", tag)
+}
+
 func TestSSHBlock(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

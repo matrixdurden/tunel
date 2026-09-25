@@ -81,19 +81,24 @@ func userHome() (string, error) {
 	return os.UserHomeDir()
 }
 
-// installSelf copies the running binary to dst. Writing a new file and
-// renaming it over dst works even while dst is running.
+// installSelf copies the running binary to dst.
 func installSelf(dst string) error {
 	exe, err := os.Executable()
 	if err != nil {
 		return err
 	}
-	if a, errA := os.Stat(exe); errA == nil {
+	return installFile(exe, dst)
+}
+
+// installFile copies src to dst. Writing a new file and renaming it over dst
+// works even while dst is running.
+func installFile(src, dst string) error {
+	if a, errA := os.Stat(src); errA == nil {
 		if b, errB := os.Stat(dst); errB == nil && os.SameFile(a, b) {
 			return nil
 		}
 	}
-	in, err := os.Open(exe)
+	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}

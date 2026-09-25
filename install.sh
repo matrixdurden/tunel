@@ -3,6 +3,7 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/matrixdurden/tunel/main/install.sh | sh -s -- server
 #   curl -fsSL https://raw.githubusercontent.com/matrixdurden/tunel/main/install.sh | sh -s -- client 'vless://…'
+#   curl -fsSL https://raw.githubusercontent.com/matrixdurden/tunel/main/install.sh | sh -s -- update
 #
 # tunel installs itself to /usr/local/bin; `tunel remove` takes everything away again.
 set -eu
@@ -16,6 +17,7 @@ if [ $# -eq 0 ]; then
   say "usage:"
   say "  curl -fsSL https://raw.githubusercontent.com/matrixdurden/tunel/main/install.sh | sh -s -- server"
   say "  curl -fsSL https://raw.githubusercontent.com/matrixdurden/tunel/main/install.sh | sh -s -- client 'vless://…'"
+  say "  curl -fsSL https://raw.githubusercontent.com/matrixdurden/tunel/main/install.sh | sh -s -- update"
   exit 2
 fi
 

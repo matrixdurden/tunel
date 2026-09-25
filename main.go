@@ -25,6 +25,7 @@ client (Windows, Linux):
   tunel off               back to the normal connection
   tunel                   show status
 
+  tunel update            install the latest version; keys, users and links stay
   tunel remove            remove everything tunel added to this computer
 `
 
@@ -80,6 +81,8 @@ func main() {
 		err = cmdOff()
 	case "remove", "uninstall":
 		err = cmdRemove()
+	case "update", "upgrade":
+		err = cmdUpdate()
 	case "version", "--version", "-v":
 		fmt.Println(version)
 	case "help", "--help", "-h":
@@ -181,6 +184,8 @@ func runAdmin(args []string) error {
 		return svcStop()
 	case "remove":
 		return adminRemove()
+	case "upgrade":
+		return adminUpgrade(args)
 	}
 	return fmt.Errorf("internal: unknown command %q", cmd)
 }
