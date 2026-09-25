@@ -480,7 +480,7 @@ func serverStatus() error {
 	} else {
 		fmt.Printf("%s○%s server stopped%s  sudo systemctl start %s%s\n", cYellow, cReset, cDim, serverUnit, cReset)
 	}
-	fmt.Printf("%s  tunel users · tunel add NAME · tunel link NAME%s\n", cDim, cReset)
+	fmt.Printf("%s  sudo tunel users · sudo tunel add NAME · sudo tunel link NAME%s\n", cDim, cReset)
 	return nil
 }
 
