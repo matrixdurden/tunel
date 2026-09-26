@@ -86,11 +86,7 @@ func cmdClient(args []string) error {
 	if err := asAdmin("client-install", l.String()); err != nil {
 		return err
 	}
-	if err := sshBlock(l); err != nil {
-		bad("ssh config: %v", err)
-	} else {
-		ok("ssh %s", l.Name)
-	}
+	sshUnblock() // tunel before v0.1.5 added a Host block; it is not needed
 	fmt.Println()
 	return cmdStatus()
 }
@@ -227,7 +223,7 @@ func cmdStatus() error {
 		return nil
 	}
 	fmt.Printf("%s●%s on  %s\n", cGreen, cReset, ip)
-	fmt.Printf("%s  all traffic goes through the server · ssh %s%s\n", cDim, l.Name, cReset)
+	fmt.Printf("%s  all traffic goes through the server%s\n", cDim, cReset)
 	warnConflicts()
 	return nil
 }
@@ -249,7 +245,7 @@ func cmdRemove() error {
 	if removed, err := sshUnblock(); err != nil {
 		bad("ssh config: %v", err)
 	} else if removed {
-		ok("ssh config")
+		ok("the old tunel block in ~/.ssh/config")
 	}
 	return nil
 }
@@ -305,7 +301,11 @@ func startTunnel(mode, logPath string) (io.Closer, error) {
 	return startBox(context.Background(), clientConfig(l, 0, logPath))
 }
 
-// ---------- ~/.ssh/config ----------
+// ---------- ~/.ssh/config left by older versions ----------
+
+// tunel no longer touches ~/.ssh/config: with the whole computer in the
+// tunnel, `ssh` to the server's address already goes through it. Versions
+// before v0.1.5 added a marked Host block; setup and remove take it out.
 
 const (
 	sshBegin = "# >>> tunel"
@@ -318,25 +318,6 @@ func sshConfigPath() (string, error) {
 		return "", err
 	}
 	return filepath.Join(home, ".ssh", "config"), nil
-}
-
-// sshBlock puts `Host NAME` first in ~/.ssh/config. It points at the server's
-// own address; with the tunnel on that reaches the server through the tunnel.
-func sshBlock(l Link) error {
-	path, err := sshConfigPath()
-	if err != nil {
-		return err
-	}
-	rest, err := sshWithoutBlock(path)
-	if err != nil {
-		return err
-	}
-	block := fmt.Sprintf("%s\nHost %s\n  HostName %s\n  Port %d\n  User %s\n  ServerAliveInterval 30\n%s\n",
-		sshBegin, l.Name, l.Host, l.SSHPort, l.Name, sshEnd)
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	return rewriteInPlace(path, block+rest)
 }
 
 func sshUnblock() (bool, error) {

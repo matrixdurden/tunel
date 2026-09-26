@@ -17,7 +17,7 @@ func TestLinkRoundTrip(t *testing.T) {
 	_, pub := newRealityKeys()
 	want := Link{
 		UUID: newUUID(), Host: "203.0.113.7", Port: 443, SNI: "dl.google.com",
-		PublicKey: pub, ShortID: newShortID(), SSHPort: 60001, Name: "ali",
+		PublicKey: pub, ShortID: newShortID(), Name: "ali",
 	}
 	got, err := ParseLink(want.String())
 	if err != nil {
@@ -28,7 +28,8 @@ func TestLinkRoundTrip(t *testing.T) {
 	}
 }
 
-// The bash tunel printed links in this shape; they must keep working.
+// The bash tunel and tunel before v0.1.5 printed links with an ssh= port;
+// they must keep working.
 func TestParseOldLink(t *testing.T) {
 	old := "vless://abdcb308-c39d-46e6-9ecf-690f7197ad64@176.40.71.186:443?encryption=none&flow=xtls-rprx-vision" +
 		"&security=reality&sni=dl.google.com&fp=chrome&pbk=rkXAfADOSJiKVB_saF64fcDBtqfIKbN8GQ_5jtOfwFI" +
@@ -37,7 +38,7 @@ func TestParseOldLink(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if l.Host != "176.40.71.186" || l.SSHPort != 60001 || l.Name != "justrises" || l.ShortID != "dd1a9f36dc990730" {
+	if l.Host != "176.40.71.186" || l.Name != "justrises" || l.ShortID != "dd1a9f36dc990730" {
 		t.Fatalf("%+v", l)
 	}
 }
@@ -55,7 +56,7 @@ func TestParseLinkRejects(t *testing.T) {
 			t.Errorf("%s: accepted %s", name, s)
 		}
 	}
-	if l, err := ParseLink(good); err != nil || l.SSHPort != 22 || l.Name != "tunel" {
+	if l, err := ParseLink(good); err != nil || l.Name != "tunel" {
 		t.Errorf("defaults: %+v %v", l, err)
 	}
 }
@@ -189,32 +190,32 @@ func TestLatestTag(t *testing.T) {
 	t.Logf("latest release: %s", tag)
 }
 
-func TestSSHBlock(t *testing.T) {
+// Older versions added a marked Host block; it must go, and nothing else.
+func TestSSHUnblock(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 	t.Setenv("SUDO_USER", "")
 	path := filepath.Join(home, ".ssh", "config")
 	os.MkdirAll(filepath.Dir(path), 0o700)
-	orig := "Host other\n  HostName 10.0.0.1\n"
-	os.WriteFile(path, []byte(orig), 0o600)
 
-	l := Link{Host: "203.0.113.7", SSHPort: 60001, Name: "ali"}
-	for i := 0; i < 2; i++ { // twice: must not duplicate
-		if err := sshBlock(l); err != nil {
-			t.Fatal(err)
-		}
-	}
-	raw, _ := os.ReadFile(path)
-	if strings.Count(string(raw), sshBegin) != 1 || !strings.HasPrefix(string(raw), sshBegin) ||
-		!strings.Contains(string(raw), "Port 60001") || !strings.HasSuffix(string(raw), orig) {
-		t.Fatalf("unexpected config:\n%s", raw)
-	}
+	own := "Host justrises\n    HostName 176.40.71.186\n    Port 60001\n    IdentityFile ~/.ssh/id_ed25519\n"
+	old := sshBegin + "\nHost justrises\n  HostName 176.40.71.186\n  Port 60001\n" + sshEnd + "\n"
+	os.WriteFile(path, []byte(old+own), 0o600)
 	if removed, err := sshUnblock(); err != nil || !removed {
 		t.Fatal(removed, err)
 	}
-	raw, _ = os.ReadFile(path)
-	if string(raw) != orig {
+	if raw, _ := os.ReadFile(path); string(raw) != own {
 		t.Fatalf("not restored:\n%q", raw)
+	}
+	if removed, err := sshUnblock(); err != nil || removed {
+		t.Fatal("second run changed something", removed, err)
+	}
+
+	// A file that held only the block was tunel's own, and goes.
+	os.WriteFile(path, []byte(old), 0o600)
+	sshUnblock()
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatal("empty config left behind")
 	}
 }

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -84,7 +83,7 @@ func (s *ServerState) user(name string) *User {
 func (s *ServerState) link(u User) Link {
 	return Link{
 		UUID: u.UUID, Host: s.Host, Port: s.Port, SNI: s.SNI,
-		PublicKey: s.PublicKey, ShortID: s.ShortID, SSHPort: sshdPort(), Name: u.Name,
+		PublicKey: s.PublicKey, ShortID: s.ShortID, Name: u.Name,
 	}
 }
 
@@ -177,7 +176,6 @@ func adminServer(args []string) error {
 	}
 	ok("sni %s", s.SNI)
 	ok("self-test %s", ip)
-	ok("ssh %d", sshdPort())
 	if s.Host != ip {
 		s.Host = ip
 		if err := s.save(); err != nil {
@@ -501,29 +499,6 @@ func adminRemoveServer() (bool, error) {
 }
 
 // ---------- helpers ----------
-
-func sshdPort() int {
-	files, _ := filepath.Glob("/etc/ssh/sshd_config.d/*.conf")
-	files = append(files, "/etc/ssh/sshd_config")
-	for _, f := range files {
-		fh, err := os.Open(f)
-		if err != nil {
-			continue
-		}
-		sc := bufio.NewScanner(fh)
-		for sc.Scan() {
-			fields := strings.Fields(sc.Text())
-			if len(fields) >= 2 && strings.EqualFold(fields[0], "port") {
-				if p, err := strconv.Atoi(fields[1]); err == nil {
-					fh.Close()
-					return p
-				}
-			}
-		}
-		fh.Close()
-	}
-	return 22
-}
 
 var spaces = regexp.MustCompile(`\s+`)
 

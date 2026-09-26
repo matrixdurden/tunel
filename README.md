@@ -41,12 +41,11 @@ tunel on        # all traffic goes through the server
 tunel dpi       # your own connection, past DPI blocks
 tunel off       # back to the normal connection
 tunel           # ● on 203.0.113.7  /  ● dpi 198.51.100.4  /  ○ off
-ssh NAME        # the server's SSH; NAME is shown by `tunel`
 ```
 
 `tunel on` and `tunel dpi` switch between each other directly. On Windows none of them need administrator permission. WSL uses the Windows tunnel automatically.
 
-Your local network (router, printer, `192.168.x.x`) never goes through the tunnel. With `tunel on`, the server's own IP address reaches the server itself, so `ssh NAME` and web apps that listen only on the server's `127.0.0.1` work, and speed is capped by the server's upload speed.
+Your local network (router, printer, `192.168.x.x`) never goes through the tunnel. With `tunel on`, the server's own IP address reaches the server itself, so SSH to it and web apps that listen only on the server's `127.0.0.1` work without going around through its router, and speed is capped by the server's upload speed.
 
 After a reboot the tunnel is off until you turn it on. If it crashes, the computer falls back to its normal connection at once.
 
@@ -79,7 +78,7 @@ Installs the latest release if there is a newer one, checks its checksum, and re
 tunel remove
 ```
 
-Removes everything tunel added: the service, the network adapter, the settings, the `PATH` entry, its block in `~/.ssh/config`, and tunel itself. On a server it also removes the server and its keys.
+Removes everything tunel added: the service, the network adapter, the settings, the `PATH` entry, and tunel itself (and the `~/.ssh/config` block that versions before v0.1.5 added). On a server it also removes the server and its keys.
 
 ## Build
 

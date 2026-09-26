@@ -17,8 +17,7 @@ type Link struct {
 	SNI       string `json:"sni"`
 	PublicKey string `json:"public_key"`
 	ShortID   string `json:"short_id"`
-	SSHPort   int    `json:"ssh_port"` // sshd port on the server; not part of the vless standard
-	Name      string `json:"name"`     // user name on the server
+	Name      string `json:"name"` // the user's name on the server
 }
 
 var (
@@ -37,9 +36,6 @@ func (l Link) String() string {
 	q.Set("pbk", l.PublicKey)
 	q.Set("sid", l.ShortID)
 	q.Set("type", "tcp")
-	if l.SSHPort != 0 {
-		q.Set("ssh", strconv.Itoa(l.SSHPort))
-	}
 	u := url.URL{
 		Scheme:   "vless",
 		User:     url.User(l.UUID),
@@ -65,10 +61,6 @@ func ParseLink(s string) (Link, error) {
 		PublicKey: q.Get("pbk"),
 		ShortID:   q.Get("sid"),
 		Name:      u.Fragment,
-	}
-	l.SSHPort, _ = strconv.Atoi(q.Get("ssh"))
-	if l.SSHPort == 0 {
-		l.SSHPort = 22
 	}
 	if !nameRe.MatchString(l.Name) {
 		l.Name = "tunel"
