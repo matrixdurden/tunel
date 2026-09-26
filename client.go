@@ -188,12 +188,23 @@ func cmdStatus() error {
 			return err
 		}
 	}
+	if svcStarting() {
+		// A start at boot waiting for the network, and in on mode for the server.
+		what := "the network"
+		if currentMode() == modeServer {
+			what = "the server; if it does not answer, the tunnel stays off"
+		}
+		fmt.Printf("%s◌%s starting  %swaiting for %s%s\n", cYellow, cReset, cDim, what, cReset)
+		fmt.Printf("%s  tunel off stops waiting%s\n", cDim, cReset)
+		return nil
+	}
 	if !svcRunning() {
 		fmt.Printf("%s○%s off\n", cYellow, cReset)
 		if hasLink() {
 			fmt.Printf("%s  tunel on   all traffic through %s%s\n", cDim, l.Host, cReset)
 		}
 		fmt.Printf("%s  tunel dpi  your own connection, past DPI blocks%s\n", cDim, cReset)
+		autostartHint()
 		return nil
 	}
 	// A plain request already takes the tunnel's way out.
@@ -213,6 +224,7 @@ func cmdStatus() error {
 			fmt.Printf("%s●%s dpi  %s\n", cGreen, cReset, ip)
 			fmt.Printf("%s  your own connection · DNS over HTTPS · TLS split against DPI%s\n", cDim, cReset)
 		}
+		autostartHint()
 		warnConflicts()
 		return nil
 	}
@@ -224,8 +236,55 @@ func cmdStatus() error {
 	}
 	fmt.Printf("%s●%s on  %s\n", cGreen, cReset, ip)
 	fmt.Printf("%s  all traffic goes through the server%s\n", cDim, cReset)
+	autostartHint()
 	warnConflicts()
 	return nil
+}
+
+// ---------- tunel autostart ----------
+
+// With autostart on, the service starts at boot and picks up where it was
+// left: in the last mode, or not at all after `tunel off`. In server mode it
+// first waits for the server, and stays off if the server does not answer.
+
+func cmdAutostart(args []string) error {
+	if !serviceExists() {
+		return fmt.Errorf("not set up; run: tunel client")
+	}
+	if len(args) == 0 {
+		if autostartEnabled() {
+			fmt.Println("autostart on: at boot tunel comes back as you left it")
+		} else {
+			fmt.Println("autostart off: after a reboot tunel is off until you turn it on")
+		}
+		return nil
+	}
+	if len(args) != 1 || (args[0] != "on" && args[0] != "off") {
+		return fmt.Errorf("usage: tunel autostart on | off")
+	}
+	if err := asAdmin("autostart", args[0]); err != nil {
+		return err
+	}
+	if args[0] == "on" {
+		ok("at boot tunel comes back as you left it: on, dpi, or off")
+		ok("in on mode it first waits for the server; if the server does not answer, it stays off")
+	} else {
+		ok("after a reboot tunel is off until you turn it on")
+	}
+	return nil
+}
+
+func adminAutostart(args []string) error {
+	if len(args) != 1 {
+		return fmt.Errorf("internal: autostart needs on or off")
+	}
+	return setAutostart(args[0] == "on")
+}
+
+func autostartHint() {
+	if autostartEnabled() {
+		fmt.Printf("%s  starts at boot as you left it · tunel autostart off%s\n", cDim, cReset)
+	}
 }
 
 func warnConflicts() {
@@ -285,23 +344,69 @@ func adminRemove() error {
 
 // ---------- running the tunnel ----------
 
+// errServerDown means the server did not answer, so the tunnel stays off
+// rather than cutting the computer off the internet.
+var errServerDown = errors.New("the server does not answer")
+
+// startFailure explains a service that stopped while starting, from its log.
+func startFailure(log string) error {
+	if strings.Contains(log, errServerDown.Error()) {
+		return fmt.Errorf("the server does not answer, so the tunnel stays off and the internet works as usual")
+	}
+	return fmt.Errorf("the tunnel did not start:\n%s", log)
+}
+
 // startTunnel brings the tunnel up in mode; closing the result takes it down.
-// The service wrapper of each OS calls it.
-func startTunnel(mode, logPath string) (io.Closer, error) {
+// The service wrapper of each OS calls it. patient is for a start nobody is
+// waiting on (at boot, after a crash): the network may still be coming up,
+// so it keeps trying for up to 90 seconds; tick reports progress meanwhile,
+// and ending ctx gives up at once.
+func startTunnel(ctx context.Context, mode, logPath string, patient bool, tick func()) (io.Closer, error) {
 	if logPath != "" {
 		os.WriteFile(logPath, nil, 0o644) // start each run with a fresh log
 	}
+	logf := func(format string, a ...any) {
+		if logPath != "" {
+			appendLog(logPath, "tunel: "+fmt.Sprintf(format, a...))
+		} else {
+			fmt.Fprintf(os.Stderr, "tunel: "+format+"\n", a...)
+		}
+	}
+	deadline := time.Now().Add(90 * time.Second)
+	retry := func(f func() bool) {
+		for !f() && patient && time.Now().Before(deadline) {
+			tick()
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(3 * time.Second):
+			}
+		}
+	}
+
 	if mode == modeDPI {
 		// Picked before the tunnel is up, so on the network as it is.
-		doh := pickDoH()
-		if logPath != "" {
-			appendLog(logPath, fmt.Sprintf("tunel: DNS over HTTPS via %q (\"\" = none answers; plain DNS %s)", doh, fallbackDNS))
+		doh := ""
+		retry(func() bool { doh = pickDoH(); return doh != "" })
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
 		}
+		logf("DNS over HTTPS via %q (\"\" = none answers; plain DNS %s)", doh, fallbackDNS)
 		return startBox(context.Background(), dpiConfig(0, logPath, doh))
 	}
+
 	l, err := loadClient()
 	if err != nil {
 		return nil, err
+	}
+	var probeErr error
+	retry(func() bool { _, probeErr = probeLink(l); return probeErr == nil })
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if probeErr != nil {
+		logf("%v (%v); the tunnel stays off and the internet works as usual", errServerDown, shortErr(probeErr))
+		return nil, errServerDown
 	}
 	return startBox(context.Background(), clientConfig(l, 0, logPath))
 }

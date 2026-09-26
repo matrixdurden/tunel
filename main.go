@@ -24,6 +24,7 @@ client (Windows, Linux):
   tunel on                send all traffic through the server
   tunel dpi               no server: your own connection, past DPI blocks
   tunel off               back to the normal connection
+  tunel autostart on|off  at boot, come back as left (on waits for the server)
   tunel                   show status
 
   tunel doctor            test this network and say which mode works (report saved)
@@ -89,6 +90,8 @@ func main() {
 		err = cmdUpdate()
 	case "doctor", "check":
 		err = cmdDoctor()
+	case "autostart":
+		err = cmdAutostart(args)
 	case "version", "--version", "-v":
 		fmt.Println(version)
 	case "help", "--help", "-h":
@@ -194,6 +197,8 @@ func runAdmin(args []string) error {
 		return adminRemove()
 	case "upgrade":
 		return adminUpgrade(args)
+	case "autostart":
+		return adminAutostart(args)
 	}
 	return fmt.Errorf("internal: unknown command %q", cmd)
 }

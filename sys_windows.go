@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -41,6 +42,7 @@ var (
 	clientLogPath   = filepath.Join(dataDir, "tunel.log")
 	clientLogHint   = clientLogPath
 	clientModePath  = filepath.Join(dataDir, "mode") // written by the service
+	offFlagPath     = filepath.Join(dataDir, "off")  // tunel off was the last word; autostart keeps it off
 	wintunMarker    = filepath.Join(dataDir, "wintun-installed-by-tunel")
 )
 
@@ -237,8 +239,7 @@ func installClient() error {
 	if err == nil {
 		cfg, err := s.Config()
 		if err == nil {
-			cfg.BinaryPathName = binPath
-			cfg.StartType = mgr.StartManual
+			cfg.BinaryPathName = binPath // the start type stays: it is tunel autostart's
 			err = s.UpdateConfig(cfg)
 		}
 		if err != nil {
@@ -439,14 +440,28 @@ func serviceExists() bool {
 	return true
 }
 
-func svcRunning() bool {
+func svcState() svc.State {
 	s, done, err := openService(windows.SERVICE_QUERY_STATUS)
 	if err != nil {
-		return false
+		return svc.Stopped
 	}
 	defer done()
 	st, err := s.Query()
-	return err == nil && st.State == svc.Running
+	if err != nil {
+		return svc.Stopped
+	}
+	return st.State
+}
+
+// svcRunning reports whether the tunnel is up: the service reports Running
+// only once it is.
+func svcRunning() bool {
+	return svcState() == svc.Running
+}
+
+// svcStarting reports a service still waiting to bring the tunnel up.
+func svcStarting() bool {
+	return svcState() == svc.StartPending
 }
 
 func svcControl(op string) error {
@@ -462,10 +477,11 @@ func svcControl(op string) error {
 // svcStart starts the service in mode, switching if it runs in the other one.
 // The mode travels as a start argument, which signed-in users may pass.
 func svcStart(mode string) error {
-	if svcRunning() {
-		if currentMode() == mode {
-			return nil
-		}
+	if svcRunning() && currentMode() == mode {
+		return nil
+	}
+	// Running in the other mode, or still waiting at boot: start over.
+	if svcRunning() || svcStarting() {
 		if err := svcStop(); err != nil {
 			return err
 		}
@@ -478,7 +494,7 @@ func svcStart(mode string) error {
 	if err := s.Start(mode); err != nil && !errors.Is(err, windows.ERROR_SERVICE_ALREADY_RUNNING) {
 		return err
 	}
-	for i := 0; i < 150; i++ {
+	for i := 0; i < 300; i++ { // server mode first checks the server
 		st, err := s.Query()
 		if err != nil {
 			return err
@@ -487,7 +503,7 @@ func svcStart(mode string) error {
 		case svc.Running:
 			return nil
 		case svc.Stopped:
-			return fmt.Errorf("the tunnel did not start:\n%s", logTail(clientLogPath))
+			return startFailure(logTail(clientLogPath))
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -519,6 +535,40 @@ func logTail(path string) string {
 		lines = lines[len(lines)-8:]
 	}
 	return "  " + strings.Join(lines, "\n  ")
+}
+
+// ---------- autostart ----------
+
+func autostartEnabled() bool {
+	s, done, err := openService(windows.SERVICE_QUERY_CONFIG)
+	if err != nil {
+		return false
+	}
+	defer done()
+	cfg, err := s.Config()
+	return err == nil && cfg.StartType == mgr.StartAutomatic
+}
+
+func setAutostart(on bool) error {
+	m, err := mgr.Connect()
+	if err != nil {
+		return err
+	}
+	defer m.Disconnect()
+	s, err := m.OpenService(svcName)
+	if err != nil {
+		return fmt.Errorf("the tunel service is missing; run: tunel client")
+	}
+	defer s.Close()
+	cfg, err := s.Config()
+	if err != nil {
+		return err
+	}
+	cfg.StartType = mgr.StartManual
+	if on {
+		cfg.StartType = mgr.StartAutomatic
+	}
+	return s.UpdateConfig(cfg)
 }
 
 // ---------- programs that break the tunnel ----------
@@ -562,25 +612,81 @@ func runClientService() error {
 type winService struct{}
 
 func (winService) Execute(args []string, req <-chan svc.ChangeRequest, st chan<- svc.Status) (bool, uint32) {
-	st <- svc.Status{State: svc.StartPending}
-	// args[0] is the service name; a restart after a crash brings no mode, so
-	// the last one is used.
+	st <- svc.Status{State: svc.StartPending, WaitHint: 10000}
+	// args[0] is the service name. tunel on/dpi add the mode; a start at boot
+	// (autostart) or after a crash brings none: then the last mode is used,
+	// unless the user turned the tunnel off.
 	mode := currentMode()
-	if len(args) > 1 && (args[1] == modeServer || args[1] == modeDPI) {
+	explicit := len(args) > 1 && (args[1] == modeServer || args[1] == modeDPI)
+	if explicit {
 		mode = args[1]
+		os.Remove(offFlagPath)
+	} else if _, err := os.Stat(offFlagPath); err == nil {
+		os.WriteFile(clientLogPath, []byte("tunel: turned off before; staying off\n"), 0o644)
+		return false, 0
 	}
 	os.WriteFile(clientModePath, []byte(mode+"\n"), 0o644)
-	b, err := startTunnel(mode, clientLogPath)
-	if err != nil {
-		appendLog(clientLogPath, "tunel: "+err.Error())
-		return true, 1
+
+	// Bring the tunnel up in the background, so tunel off (a Stop) can end a
+	// start that is still waiting for the network or the server.
+	const accepts = svc.AcceptStop | svc.AcceptShutdown
+	var check uint32
+	tick := func() {
+		check++
+		st <- svc.Status{State: svc.StartPending, Accepts: accepts, CheckPoint: check, WaitHint: 10000}
 	}
-	st <- svc.Status{State: svc.Running, Accepts: svc.AcceptStop | svc.AcceptShutdown}
+	st <- svc.Status{State: svc.StartPending, Accepts: accepts, WaitHint: 10000}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	type started struct {
+		b   io.Closer
+		err error
+	}
+	done := make(chan started, 1)
+	go func() {
+		b, err := startTunnel(ctx, mode, clientLogPath, !explicit, tick)
+		done <- started{b, err}
+	}()
+	var b io.Closer
+	for b == nil {
+		select {
+		case r := <-done:
+			switch {
+			case errors.Is(r.err, errServerDown), errors.Is(r.err, context.Canceled):
+				return false, 0 // stopped on purpose, not a failure to recover from
+			case r.err != nil:
+				appendLog(clientLogPath, "tunel: "+r.err.Error())
+				return true, 1
+			}
+			b = r.b
+		case c := <-req:
+			switch c.Cmd {
+			case svc.Interrogate:
+				st <- c.CurrentStatus
+			case svc.Stop, svc.Shutdown:
+				if c.Cmd == svc.Stop {
+					os.WriteFile(offFlagPath, nil, 0o644)
+				}
+				st <- svc.Status{State: svc.StopPending}
+				cancel()
+				if r := <-done; r.b != nil {
+					r.b.Close()
+				}
+				return false, 0
+			}
+		}
+	}
+	st <- svc.Status{State: svc.Running, Accepts: accepts}
 	for c := range req {
 		switch c.Cmd {
 		case svc.Interrogate:
 			st <- c.CurrentStatus
 		case svc.Stop, svc.Shutdown:
+			if c.Cmd == svc.Stop {
+				// tunel off (or a pause that turns it back on right after). A
+				// shutdown is not a choice to turn it off, so it leaves no mark.
+				os.WriteFile(offFlagPath, nil, 0o644)
+			}
 			st <- svc.Status{State: svc.StopPending}
 			b.Close()
 			return false, 0

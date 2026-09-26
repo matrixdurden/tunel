@@ -47,7 +47,7 @@ tunel           # ● on 203.0.113.7  /  ● dpi 198.51.100.4  /  ○ off
 
 Your local network (router, printer, `192.168.x.x`) never goes through the tunnel. With `tunel on`, the server's own IP address reaches the server itself, so SSH to it and web apps that listen only on the server's `127.0.0.1` work without going around through its router, and speed is capped by the server's upload speed.
 
-After a reboot the tunnel is off until you turn it on. If it crashes, the computer falls back to its normal connection at once.
+After a reboot the tunnel is off until you turn it on, unless you run `tunel autostart on` (once; `off` undoes it). Then at boot it comes back as you left it: in `on` mode, in `dpi` mode, or off after `tunel off`. It first waits for the network; in `on` mode it also checks the server, and if the server does not answer within 90 seconds it stays off and the internet works as usual. `tunel on` checks the server too, and leaves everything as it is if the server does not answer. If the tunnel crashes, the computer falls back to its normal connection at once.
 
 On a new network, `tunel doctor` measures what it does (sign-in page, DNS rewriting, DNS over HTTPS, site-name filtering, HTTPS inspection, whether the server is reachable) and says which mode will work. It saves the report to the desktop, for when that network blocks everything else. `tunel dpi` picks, each time it starts, the first DNS over HTTPS server the network lets through, and falls back to plain DNS if none does.
 

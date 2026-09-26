@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"os/user"
@@ -14,7 +16,8 @@ import (
 // On Linux a client owns:
 //   /usr/local/bin/tunel                this binary
 //   /etc/tunel/client.json              the link
-//   /etc/systemd/system/tunel.service   runs `tunel service`; never enabled, so off after a reboot
+//   /etc/systemd/system/tunel.service   runs `tunel service`; enabled only by tunel autostart on
+//   /etc/tunel/mode, /etc/tunel/off     the last mode, and whether tunel off was the last word
 //   the "tunel" TUN device              exists only while the tunnel is on
 
 const (
@@ -22,9 +25,13 @@ const (
 	installedBin    = linuxBin
 	clientStatePath = "/etc/tunel/client.json"
 	clientModePath  = "/etc/tunel/mode"
+	offFlagPath     = "/etc/tunel/off"
 	clientUnitPath  = "/etc/systemd/system/tunel.service"
 	clientUnit      = "tunel"
 	clientLogHint   = "journalctl -u tunel"
+	// Marks a start by tunel on/dpi. /run is emptied at boot, so a start at
+	// boot never sees it.
+	explicitMark = "/run/tunel-explicit-start"
 )
 
 const clientUnitFile = `[Unit]
@@ -36,6 +43,9 @@ Wants=network-online.target
 ExecStart=/usr/local/bin/tunel service
 Restart=on-failure
 RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
 `
 
 func setupConsole() {
@@ -139,8 +149,8 @@ func installClient() error {
 }
 
 func uninstallClient() error {
-	exec.Command("systemctl", "stop", clientUnit).Run()
-	for _, p := range []string{clientUnitPath, clientStatePath, clientModePath} {
+	exec.Command("systemctl", "disable", "--now", clientUnit).Run()
+	for _, p := range []string{clientUnitPath, clientStatePath, clientModePath, offFlagPath, explicitMark} {
 		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
@@ -162,8 +172,23 @@ func serviceExists() bool {
 	return err == nil
 }
 
-func svcRunning() bool {
+func unitActive() bool {
 	return exec.Command("systemctl", "is-active", "--quiet", clientUnit).Run() == nil
+}
+
+func tunUp() bool {
+	_, err := net.InterfaceByName(tunName)
+	return err == nil
+}
+
+// svcRunning reports whether the tunnel is up, not just its service.
+func svcRunning() bool {
+	return unitActive() && tunUp()
+}
+
+// svcStarting reports a service still waiting to bring the tunnel up.
+func svcStarting() bool {
+	return unitActive() && !tunUp()
 }
 
 func svcControl(op string) error {
@@ -178,30 +203,74 @@ func svcStart(mode string) error {
 	if err := writeFileAtomic(clientModePath, []byte(mode+"\n"), 0o644); err != nil {
 		return err
 	}
+	os.Remove(offFlagPath)
+	os.WriteFile(explicitMark, nil, 0o644)
 	if err := systemctl("restart", clientUnit); err != nil {
 		return err
 	}
-	// The unit reports active at once; give sing-box a moment to fail if it will.
-	time.Sleep(1500 * time.Millisecond)
-	if !svcRunning() {
-		out, _ := exec.Command("journalctl", "-u", clientUnit, "-n", "8", "--no-pager", "-o", "cat").Output()
-		return fmt.Errorf("the tunnel did not start:\n%s", out)
+	// The unit reports active at once; the tunnel is up once its device is.
+	// Server mode first checks the server, which takes a moment.
+	for i := 0; i < 60; i++ {
+		time.Sleep(500 * time.Millisecond)
+		if !unitActive() {
+			out, _ := exec.Command("journalctl", "-u", clientUnit, "-n", "8", "--no-pager", "-o", "cat").Output()
+			return startFailure(string(out))
+		}
+		if tunUp() {
+			return nil
+		}
 	}
-	return nil
+	return fmt.Errorf("the tunnel is taking too long to start; see: %s", clientLogHint)
 }
 
+// svcStop turns the tunnel off and remembers that it was turned off, so
+// autostart leaves it off. Callers that turn it back on right after clear this.
 func svcStop() error {
 	if !serviceExists() {
 		return nil
 	}
+	os.WriteFile(offFlagPath, nil, 0o644)
 	return systemctl("stop", clientUnit)
 }
 
 func runClientService() error {
-	b, err := startTunnel(currentMode(), "")
+	_, err := os.Stat(explicitMark)
+	explicit := err == nil
+	os.Remove(explicitMark)
+	if !explicit {
+		if _, err := os.Stat(offFlagPath); err == nil {
+			fmt.Fprintln(os.Stderr, "tunel: turned off before; staying off")
+			return nil
+		}
+	}
+	// systemctl stop sends SIGTERM, which ends a start still waiting too.
+	b, err := startTunnel(context.Background(), currentMode(), "", !explicit, func() {})
+	if errors.Is(err, errServerDown) {
+		return nil // stopped on purpose; systemd does not restart a clean exit
+	}
 	if err != nil {
 		return err
 	}
 	waitSignal()
 	return b.Close()
+}
+
+// ---------- autostart ----------
+
+func autostartEnabled() bool {
+	return exec.Command("systemctl", "is-enabled", "--quiet", clientUnit).Run() == nil
+}
+
+func setAutostart(on bool) error {
+	// Units written before autostart existed have no [Install] section.
+	if err := writeFileAtomic(clientUnitPath, []byte(clientUnitFile), 0o644); err != nil {
+		return err
+	}
+	if err := systemctl("daemon-reload"); err != nil {
+		return err
+	}
+	if on {
+		return systemctl("enable", "--quiet", clientUnit)
+	}
+	return systemctl("disable", "--quiet", clientUnit)
 }
