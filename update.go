@@ -70,6 +70,10 @@ func cmdUpdate() error {
 	}
 	os.Chmod(file, 0o755)
 	ok("downloaded %s", latest)
+	if serverInstalled() {
+		fmt.Printf("  %sthe server restarts: connections through it drop for a moment, this SSH\n", cDim)
+		fmt.Printf("  session too if it runs through the tunnel. Reconnect and run tunel to check.%s\n", cReset)
+	}
 
 	if err := asAdmin("upgrade", file, want); err != nil {
 		return err
