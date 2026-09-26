@@ -83,7 +83,7 @@ func TestClientConfigParses(t *testing.T) {
 		t.Errorf("server: %v", err)
 	}
 	for _, socks := range []int{0, 1080} {
-		if err := checkConfig(dpiConfig(socks, "")); err != nil {
+		if err := checkConfig(dpiConfig(socks, "", "1.1.1.1")); err != nil {
 			t.Errorf("dpi socks=%d: %v", socks, err)
 		}
 	}
@@ -96,7 +96,7 @@ func TestDPIDirect(t *testing.T) {
 		t.Skip("needs internet")
 	}
 	port, _ := freePort()
-	b, err := startBox(context.Background(), dpiConfig(port, os.DevNull))
+	b, err := startBox(context.Background(), dpiConfig(port, os.DevNull, "1.1.1.1"))
 	if err != nil {
 		t.Fatal(err)
 	}

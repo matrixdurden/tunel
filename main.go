@@ -26,6 +26,7 @@ client (Windows, Linux):
   tunel off               back to the normal connection
   tunel                   show status
 
+  tunel doctor            test this network and say which mode works (report saved)
   tunel update            install the latest version; keys, users and links stay
   tunel remove            remove everything tunel added to this computer
 `
@@ -86,6 +87,8 @@ func main() {
 		err = cmdRemove()
 	case "update", "upgrade":
 		err = cmdUpdate()
+	case "doctor", "check":
+		err = cmdDoctor()
 	case "version", "--version", "-v":
 		fmt.Println(version)
 	case "help", "--help", "-h":

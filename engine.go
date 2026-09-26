@@ -140,13 +140,19 @@ var dpiRule = obj{"protocol": "tls", "action": "route-options", "tls_record_frag
 // HTTPS, so no blocked answers; and every TLS handshake is split into several
 // TLS records, so the filter cannot read the site name (SNI). Of fragment,
 // record fragment and spoof, only record fragment got through there, and it
-// costs nothing. With a socksPort it opens a local proxy instead (for tests).
-func dpiConfig(socksPort int, logPath string) obj {
+// costs nothing. doh is the DNS over HTTPS server to use (see pickDoH); ""
+// means none answers on this network, and plain DNS is used instead. With a
+// socksPort it opens a local proxy instead (for tests and tunel doctor).
+func dpiConfig(socksPort int, logPath, doh string) obj {
+	dns := obj{"type": "https", "tag": "doh", "server": doh}
+	if doh == "" {
+		dns = obj{"type": "udp", "tag": "doh", "server": fallbackDNS}
+	}
 	cfg := obj{
 		"log":       logOptions(logPath),
 		"outbounds": []obj{{"type": "direct", "tag": "direct"}},
 		"dns": obj{
-			"servers":  []obj{{"type": "https", "tag": "doh", "server": "1.1.1.1"}},
+			"servers":  []obj{dns},
 			"final":    "doh",
 			"strategy": "ipv4_only",
 		},

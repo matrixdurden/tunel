@@ -292,13 +292,27 @@ func startTunnel(mode, logPath string) (io.Closer, error) {
 		os.WriteFile(logPath, nil, 0o644) // start each run with a fresh log
 	}
 	if mode == modeDPI {
-		return startBox(context.Background(), dpiConfig(0, logPath))
+		// Picked before the tunnel is up, so on the network as it is.
+		doh := pickDoH()
+		if logPath != "" {
+			appendLog(logPath, fmt.Sprintf("tunel: DNS over HTTPS via %q (\"\" = none answers; plain DNS %s)", doh, fallbackDNS))
+		}
+		return startBox(context.Background(), dpiConfig(0, logPath, doh))
 	}
 	l, err := loadClient()
 	if err != nil {
 		return nil, err
 	}
 	return startBox(context.Background(), clientConfig(l, 0, logPath))
+}
+
+func appendLog(path, line string) {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o644)
+	if err != nil {
+		return
+	}
+	fmt.Fprintln(f, line)
+	f.Close()
 }
 
 // ---------- ~/.ssh/config left by older versions ----------

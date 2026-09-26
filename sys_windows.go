@@ -588,12 +588,3 @@ func (winService) Execute(args []string, req <-chan svc.ChangeRequest, st chan<-
 	}
 	return false, 0
 }
-
-func appendLog(path, line string) {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o644)
-	if err != nil {
-		return
-	}
-	fmt.Fprintln(f, line)
-	f.Close()
-}

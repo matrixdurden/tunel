@@ -49,6 +49,8 @@ Your local network (router, printer, `192.168.x.x`) never goes through the tunne
 
 After a reboot the tunnel is off until you turn it on. If it crashes, the computer falls back to its normal connection at once.
 
+On a new network, `tunel doctor` measures what it does (sign-in page, DNS rewriting, DNS over HTTPS, site-name filtering, HTTPS inspection, whether the server is reachable) and says which mode will work. It saves the report to the desktop, for when that network blocks everything else. `tunel dpi` picks, each time it starts, the first DNS over HTTPS server the network lets through, and falls back to plain DNS if none does.
+
 Close GoodbyeDPI or zapret before using tunel: they add fake packets that break connections through the tunnel, and `tunel dpi` does their job. `tunel` warns when they run.
 
 ## Users
